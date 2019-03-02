@@ -1,0 +1,1007 @@
+/***************************************************************************************
+    Name    : Ardu Box Jointer
+    Author  : Max MakeVerse
+    Created : 19/01/2019
+    Last Modified: 08/02/2019
+    Version : 1.0
+ ***************************************************************************************/
+
+ // THINGS TO DO
+ // 1) adjust the fingers menu
+ // 2)
+
+// -----------------------------------------------------------------------------------------------------------------------------------------------------
+// Stepping variables
+// -----------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+const int STEP_PIN = 30;   // clk+
+const int Enable_PIN = 32; // en+
+const int DIR_PIN = 34;    //cw+
+const int inLed = 13;
+const int lSwitch = 53;
+
+ 
+int velocity;                 //  this is set by the user and serves to calculate the following variable.
+                              //  value from 1 to 10 then the corresponding actual value is calculated
+int homingVelocity = 0; 
+
+int accelRate;             //  value from 1 to 10 then the corresponding actual value is calculated
+
+int homingAccel = 1;
+
+int curPosition = 0;
+
+int minStepDelay = 100;        //  max velocity of the stepper motor
+int maxMovingStepDelay = 2500;      //  min velocity of the stepper motor
+
+int minAccelCycles = 20;      //  
+int maxAccelCycles = 500;     //
+
+int mmPerRev = 5;             //  5 mm x
+
+
+// -----------------------------------------------------------------------------------------------------------------------------------------------------
+// Finger joint variables
+// -----------------------------------------------------------------------------------------------------------------------------------------------------
+
+int numberOfFingers = 10;
+float kerf = 3.5;
+int lumberWidth = 150;
+int Overlap = 1;
+float tolerance = 0.01;   // this is the tolerance between the plain slot and the cut slot
+
+float avanzamentoStd = kerf - Overlap;
+float dimSlot = (lumberWidth - tolerance * numberOfFingers)/(numberOfFingers*2);
+float slotTolerance = dimSlot + tolerance;
+int NumeroCicliInSlot = slotTolerance / (kerf - Overlap);
+
+long jobTimer;
+
+// -----------------------------------------------------------------------------------------------------------------------------------------------------
+// Creates 3 CUSTOM CHARACTERS for the menu display
+// -----------------------------------------------------------------------------------------------------------------------------------------------------
+byte downArrow[8] = {     // 8 is the number of arrays 
+  0b00100, //   *         // you can make your own custom characters at https://maxpromer.github.io/LCD-Character-Creator/
+  0b00100, //   *
+  0b00100, //   *
+  0b00100, //   *
+  0b00100, //   *
+  0b10101, // * * *
+  0b01110, //  ***
+  0b00100  //   *
+};
+
+byte upArrow[8] = {
+  0b00100, //   *
+  0b01110, //  ***
+  0b10101, // * * *
+  0b00100, //   *
+  0b00100, //   *
+  0b00100, //   *
+  0b00100, //   *
+  0b00100  //   *
+};
+
+byte menuCursor[8] = {
+  B01000, //  *
+  B00100, //   *
+  B00010, //    *
+  B00001, //     *
+  B00010, //    *
+  B00100, //   *
+  B01000, //  *
+  B00000  //
+};
+
+
+// this is a special character to display the status of the homing procedure
+byte loadingCursor[8] = {
+  B01010,
+  B10101,
+  B01010,
+  B10101,
+  B01010,
+  B10101,
+  B01010,
+  B10101
+};
+
+// -----------------------------------------------------------------------------------------------------------------------------------------------------
+// include the LCD libraries
+// -----------------------------------------------------------------------------------------------------------------------------------------------------
+#include <Wire.h>
+#include <LiquidCrystal.h>
+
+// Setting the LCD shields pins
+LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
+
+
+// Navigation button variables
+int readKey;
+// Menu control variables
+String menuItems[] = {"Ardu BOX JOINT", "Fingers", "Kerf", "Width", "Overlap", "Tolerance", "Results", "Home procedure", "Start Cut"};
+int menuPage = 0;
+int maxMenuPages = 7;           // round(((sizeof(menuItems) / sizeof(String)) / 2) + .5);
+int cursorPosition = 0;
+
+
+
+// Stepper Motor Travel Variables
+
+long TravelX;                       // this is used to store the X value
+long maxTravelX = 1350;             // Default maximum travel in [mm]
+long sprX = 400;                    // SPR: steps per revolution: 400 = half stepping
+long pitchX = 40;                   // Pitch [mm/revolution)
+float mmToStepX = sprX / pitchX;    // Multiplier to convert mm to steps: spr / pitch
+int move_finished = 1;              // used to check if the movement is completed
+long initial_homing = -1;           // this is the initial movement of the stepper used during the homing procedure 
+                                    // where the minus symbol represents the direction of the rotation (translation)
+int homing = 0;                     // if the homing procedure has been done the value will be 1 and the menu will skip to
+                                    // ask agai if you want to home. You'll be able just to press left and go back to the main 
+                                    // page of the menu.                            
+
+                
+                
+
+// -----------------------------------------------------------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------------------------------------
+void setup() {
+  
+  // Initializes serial communication
+  Serial.begin(9600);
+    
+  pinMode(STEP_PIN, OUTPUT);
+  pinMode(Enable_PIN, OUTPUT);
+  pinMode(DIR_PIN, OUTPUT);
+  pinMode(inLed, OUTPUT);
+  pinMode(lSwitch, INPUT);
+  digitalWrite(STEP_PIN, LOW);
+  digitalWrite(Enable_PIN, HIGH); //When device turned on the motor has NOT holding power. The holdig power is given after homing
+  
+  // -----------------------------------------------------------------------------------
+  // call HOMING PROCEDURE function
+  // -----------------------------------------------------------------------------------
+  //homingProcedure();                  // this function initializes the homing procedure once the Arduino board is powered on
+ 
+
+  // Initializes and clears the LCD screen
+  lcd.begin(16, 2);
+  lcd.clear();
+
+  // Creates the byte for the 3 custom characters
+  lcd.createChar(0, menuCursor);
+  lcd.createChar(1, upArrow);
+  lcd.createChar(2, downArrow);
+  lcd.createChar(3, loadingCursor);
+}
+
+void loop() {
+
+  mainMenuDraw();
+  drawCursor();
+  operateMainMenu();
+  float avanzamentoStd = kerf - Overlap;
+  int dimSlot = (lumberWidth - tolerance * numberOfFingers)/(numberOfFingers*2);
+}
+
+
+void mainMenuDraw() {
+  
+  // -----------------------------------------------------------------------------------------------------------------------------------------------------
+  //  This function will generate the 2 menu items that can fit on the screen. They will change as you scroll through your menu. 
+  //  Up and down arrows will indicate your current menu position.
+  // -----------------------------------------------------------------------------------------------------------------------------------------------------
+  
+
+  Serial.print(menuPage);
+  
+  printOnLCDA(menuItems[menuPage], menuItems[menuPage + 1]);
+  
+//  lcd.clear();
+//  lcd.setCursor(1, 0);
+//  lcd.print(menuItems[menuPage]);
+//  lcd.setCursor(1, 1);
+//  lcd.print(menuItems[menuPage + 1]);
+
+  if (menuPage == 0) {
+    lcd.setCursor(15, 1);
+    lcd.write(byte(2));
+  } else if (menuPage > 0 and menuPage < maxMenuPages) {
+    lcd.setCursor(15, 1);
+    lcd.write(byte(2));
+    lcd.setCursor(15, 0);
+    lcd.write(byte(1));
+  } else if (menuPage == maxMenuPages) {
+    lcd.setCursor(15, 0);
+    lcd.write(byte(1));
+  }
+}
+
+
+void drawCursor() {
+  // When called, this function will erase the current cursor and redraw it based on the cursorPosition and menuPage variables.
+  for (int x = 0; x < 2; x++) {     // Erases current cursor
+    lcd.setCursor(0, x);
+    lcd.print(" ");
+  }
+
+  // The menu is set up to be progressive (menuPage 0 = Item 1 & Item 2, menuPage 1 = Item 2 & Item 3, menuPage 2 = Item 3 & Item 4), so
+  // in order to determine where the cursor should be you need to see if you are at an odd or even menu page and an odd or even cursor position.
+  if (menuPage % 2 == 0) {
+    if (cursorPosition % 2 == 0) {  // If the menu page is even and the cursor position is even that means the cursor should be on line 1
+      lcd.setCursor(0, 0);
+      lcd.write(byte(0));
+    }
+    if (cursorPosition % 2 != 0) {  // If the menu page is even and the cursor position is odd that means the cursor should be on line 2
+      lcd.setCursor(0, 1);
+      lcd.write(byte(0));
+    }
+  }
+  if (menuPage % 2 != 0) {
+    if (cursorPosition % 2 == 0) {  // If the menu page is odd and the cursor position is even that means the cursor should be on line 2
+      lcd.setCursor(0, 1);
+      lcd.write(byte(0));
+    }
+    if (cursorPosition % 2 != 0) {  // If the menu page is odd and the cursor position is odd that means the cursor should be on line 1
+      lcd.setCursor(0, 0);
+      lcd.write(byte(0));
+    }
+  }
+}
+
+
+void operateMainMenu() {
+  int activeButton = 0;
+  while (activeButton == 0) {
+    int button;
+    readKey = analogRead(0);
+    if (readKey < 790) {
+      delay(100);
+      readKey = analogRead(0);
+    }
+    button = evaluateButton(readKey);
+    switch (button) {
+      case 0: // When button returns as 0 there is no action taken
+        break;
+      case 1:  // This case will execute if the "forward" button is pressed
+        button = 0;
+        switch (cursorPosition) { // The case that is selected here is dependent on which menu page you are on and where the cursor is.
+          case 0:
+            menuItem1();  // not used as the first line is used for the logo
+            break;
+          case 1:
+            menuItem2();  // number of fingers setting
+            break;
+          case 2:
+            menuItem3();  // kerf settings
+            break;
+          case 3:
+            menuItem4();  // lumber width settings
+            break;
+          case 4:
+            menuItem5();  // overlap setting
+            break;
+          case 5:
+            menuItem6();  // tolerance setting
+            break;
+          case 6:
+            menuItem7();  // homing procedure
+            break;
+          case 7:
+            menuItem8();  // start cutting procedure sub menu
+            break;
+          case 8:         // not used
+            menuItem9();
+            break;
+          case 9:         // not used
+            //menuItem10();
+            break;
+        }
+        activeButton = 1;
+        mainMenuDraw();
+        drawCursor();
+        break;
+      case 2:
+        button = 0;
+        if (menuPage == 0) {
+          cursorPosition = cursorPosition - 1;
+          cursorPosition = constrain(cursorPosition, 0, ((sizeof(menuItems) / sizeof(String)) - 1));
+        }
+        if (menuPage % 2 == 0 and cursorPosition % 2 == 0) {
+          menuPage = menuPage - 1;
+          menuPage = constrain(menuPage, 0, maxMenuPages);
+        }
+
+        if (menuPage % 2 != 0 and cursorPosition % 2 != 0) {
+          menuPage = menuPage - 1;
+          menuPage = constrain(menuPage, 0, maxMenuPages);
+        }
+
+        cursorPosition = cursorPosition - 1;
+        cursorPosition = constrain(cursorPosition, 0, ((sizeof(menuItems) / sizeof(String)) - 1));
+
+        mainMenuDraw();
+        drawCursor();
+        activeButton = 1;
+        break;
+      case 3:
+        button = 0;
+        if (menuPage % 2 == 0 and cursorPosition % 2 != 0) {
+          menuPage = menuPage + 1;
+          menuPage = constrain(menuPage, 0, maxMenuPages);
+        }
+
+        if (menuPage % 2 != 0 and cursorPosition % 2 == 0) {
+          menuPage = menuPage + 1;
+          menuPage = constrain(menuPage, 0, maxMenuPages);
+        }
+
+        cursorPosition = cursorPosition + 1;
+        cursorPosition = constrain(cursorPosition, 0, ((sizeof(menuItems) / sizeof(String)) - 1));
+        mainMenuDraw();
+        drawCursor();
+        activeButton = 1;
+        break;
+    }
+  }
+}
+
+
+int evaluateButton(int x) {
+  // This function is called whenever a button press is evaluated. The LCD shield works by observing a voltage drop across the buttons all hooked up to A0.
+  int result = 0;
+  if (x < 50) {
+    result = 1; // right
+  } else if (x < 195) {
+    result = 2; // up
+  } else if (x < 380) {
+    result = 3; // down
+  } else if (x < 790) {
+    result = 4; // left
+  }
+  return result;
+}
+
+
+void drawInstructions() {
+  // If there are common usage instructions on more than 1 of your menu items you can call this function from the sub
+  // menus to make things a little more simplified. If you don't have common instructions or verbage on multiple menus
+  // I would just delete this void. You must also delete the drawInstructions()function calls from your sub menu functions.
+  
+  lcd.setCursor(0, 1); // Set cursor to the bottom line
+  lcd.print("Use ");
+  lcd.print(byte(1)); // Up arrow
+  lcd.print("/");
+  lcd.print(byte(2)); // Down arrow
+  lcd.print(" buttons");
+}
+
+
+
+void eraseLine(int row){
+  lcd.setCursor(0, row);                        // Start of row
+  lcd.print("                    ");            // 20 spaces
+  lcd.setCursor(0, row);                        // Start of row
+}
+
+
+
+void menuItem1() { // Function executes when you select the 2nd item from main menu
+  int activeButton = 0;
+  lcd.clear();
+}
+
+
+void menuItem2() { // Function executes when you select the 2nd item from main menu
+  int activeButton = 0;
+
+
+  printOnLCD("Fingers Needed:", numberOfFingers);
+//  lcd.clear();
+//  lcd.setCursor(0, 0);
+//  lcd.print("Fingers Needed:");
+//  lcd.setCursor(0, 1);
+//  lcd.print(numberOfFingers);
+  
+
+  while (activeButton == 0) {
+    int button;
+    readKey = analogRead(0);
+    
+    lcd.cursor();                                 // Turn on blinking cursor
+    lcd.blink();                                  // Turn on blinking cursor
+
+    lcd.noBlink();                                // Turn off blinking curosr
+    lcd.noCursor();                               // Turn off blinking curosr
+    
+    if (readKey < 790) {
+      delay(100);
+      readKey = analogRead(0);
+    }
+    button = evaluateButton(readKey);
+    switch (button) {
+      case 4:                               // This case will execute if the "back" button is pressed
+        button = 0;
+        activeButton = 1;
+        break;
+      case 2:                               // This case will execute if the "up" button is pressed
+        numberOfFingers++;
+      eraseLine(1);                         // Erases line 1        
+        lcd.print(numberOfFingers);
+        break;
+      case 3:                               // This case will execute if the "down" button is pressed
+        numberOfFingers--;
+        eraseLine(1);                       // Erases line 1        
+        lcd.print(numberOfFingers);
+        break;        
+    }
+  }
+}
+
+void menuItem3() {                          // Function executes when you select the 3rd item from main menu
+  int activeButton = 0;
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Kerf size:");
+  lcd.setCursor(0,1);
+  lcd.print(kerf);
+
+  while (activeButton == 0) {
+    int button;
+    readKey = analogRead(0);
+    if (readKey < 790) {
+      delay(100);
+      readKey = analogRead(0);
+    }
+    button = evaluateButton(readKey);
+    switch (button) {
+      case 4:  // This case will execute if the "back" button is pressed
+        button = 0;
+        activeButton = 1;
+        break;
+      case 2: // This case will execute if the "up" button is pressed
+        kerf = kerf + 0.05;
+        eraseLine(1);                      // Erases line 1        
+        lcd.print(kerf);
+        break;
+      case 3: // This case will execute if the "down" button is pressed
+        kerf = kerf - 0.05;
+        eraseLine(1);                      // Erases line 1        
+        lcd.print(kerf);
+        break;
+    }
+  }
+}
+
+void menuItem4() { // Function executes when you select the 3rd item from main menu
+  int activeButton = 0;
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Lumber width:");
+  lcd.setCursor(0,1);
+  lcd.print(lumberWidth);
+
+  while (activeButton == 0) {
+    int button;
+    readKey = analogRead(0);
+    if (readKey < 790) {
+      delay(100);
+      readKey = analogRead(0);
+    }
+    button = evaluateButton(readKey);
+    switch (button) {
+      case 4:  // This case will execute if the "back" button is pressed
+        button = 0;
+        activeButton = 1;
+        break;
+      case 2: // This case will execute if the "up" button is pressed
+        lumberWidth = lumberWidth + 10;
+        eraseLine(1);                      // Erases line 1        
+        lcd.print(lumberWidth);
+        break;
+      case 3: // This case will execute if the "down" button is pressed
+        lumberWidth = lumberWidth - 10;
+        eraseLine(1);                      // Erases line 1        
+        lcd.print(lumberWidth);
+        break;
+    }
+  }
+}
+
+void menuItem5() { // Function executes when you select the 5th item from main menu
+  int activeButton = 0;
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Cut Overlap:");
+  lcd.setCursor(0,1);
+  lcd.print(Overlap);
+  
+  while (activeButton == 0) {
+    int button;
+    readKey = analogRead(0);
+    if (readKey < 790) {
+      delay(100);
+      readKey = analogRead(0);
+    }
+    button = evaluateButton(readKey);
+    switch (button) {
+      case 4:  // This case will execute if the "back" button is pressed
+        button = 0;
+        activeButton = 1;
+        break;
+      case 2: // This case will execute if the "up" button is pressed
+        Overlap++;
+        eraseLine(1);                      // Erases line 1        
+        lcd.print(Overlap);
+        break;
+      case 3: // This case will execute if the "down" button is pressed
+        Overlap--;
+        eraseLine(1);                      // Erases line 1        
+        lcd.print(Overlap);
+        break;
+    }
+  }
+}
+
+void menuItem6() { // Function executes when you select the 6th item from main menu
+  int activeButton = 0;
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Tolerance:");
+  lcd.setCursor(0,1);
+  lcd.print(tolerance);
+  
+  while (activeButton == 0) {
+    int button;
+    readKey = analogRead(0);
+    if (readKey < 790) {
+      delay(100);
+      readKey = analogRead(0);
+    }
+    button = evaluateButton(readKey);
+    switch (button) {
+      case 4:  // This case will execute if the "back" button is pressed
+        button = 0;
+        activeButton = 1;
+        break;
+      case 2: // This case will execute if the "up" button is pressed
+        tolerance = tolerance + 0.01;
+        eraseLine(1);                      // Erases line 1        
+        lcd.print(tolerance);
+        break;
+      case 3: // This case will execute if the "down" button is pressed
+        tolerance = tolerance - 0.01;
+        eraseLine(1);                      // Erases line 1        
+        lcd.print(tolerance);
+        break;
+    }
+  }
+}
+
+void menuItem7() {  // This sub menu is useful to display the results of the settings
+
+  int activeButton = 0;
+
+  lcd.clear();
+
+  // calculate again the main parameters
+  avanzamentoStd = kerf - Overlap;
+  dimSlot = (lumberWidth - tolerance * numberOfFingers)/(numberOfFingers*2);
+  slotTolerance = dimSlot + tolerance;
+  NumeroCicliInSlot = slotTolerance / (kerf - Overlap);
+
+  lcd.setCursor(0,0);
+  lcd.print(slotTolerance);
+  lcd.setCursor(0,1);
+  lcd.print(NumeroCicliInSlot);
+  
+
+  while (activeButton == 0) {
+    int button;
+    readKey = analogRead(0);
+    if (readKey < 790) {
+      delay(100);
+      readKey = analogRead(0);
+    }
+    button = evaluateButton(readKey);
+    switch (button) {
+      case 4:  // This case will execute if the "back" button is pressed
+        button = 0;
+        activeButton = 1;
+        break;
+    }
+  }  
+
+}
+
+void menuItem8() { // this submenu calls the HOMING PROCEDURE function
+  int activeButton = 0;
+
+  if (homing == 1){
+    homing = 0;
+
+    // printOnLCD(alpha, beta);
+    printOnLCD("Homing done","");
+    
+    while (activeButton == 0) {
+      int button;
+      readKey = analogRead(0);
+      if (readKey < 790) {
+        delay(100);
+        readKey = analogRead(0);
+      }
+      button = evaluateButton(readKey);    
+      switch (button) {
+        case 4:  //  back button is pressed and go back to the main menu
+          button = 0;
+          activeButton = 1;
+          break;
+      }
+    }
+  }else if (homing == 0){
+
+    String yn = "No";
+    printOnLCD("Start Homing?", yn);
+   
+    //  Reading the button value in order to switch from yes to no and viceversa
+    
+    while (activeButton == 0) {
+      int button;
+      readKey = analogRead(0);
+      
+      if (readKey < 790) {
+        delay(100);
+        readKey = analogRead(0);
+      }
+
+      //  Button evaluation function
+        
+      button = evaluateButton(readKey);
+      
+      switch (button) {
+        case 1:                       // Right button is pressed
+            if (yn == "Yes"){          
+              homingPro();      // If yes the HOMING function is called               
+            }else if (yn == "No") {   
+              button = 0;             // If no, acts same as if the left button was called
+              activeButton = 1;       
+            }
+          break;
+        case 2:                                 // Up button
+          if (yn == "No"){
+            yn = "Yes";
+            eraseLine(1);                      // Erases line 1        
+            lcd.print(yn); 
+          }else if (yn == "Yes") {
+            yn = "No";
+            eraseLine(1);                      // Erases line 1        
+            lcd.print(yn);          
+          }
+          break;
+        case 3:                                // Down button
+          if (yn == "No"){
+            yn = "Yes";
+            eraseLine(1);                      // Erases line 1        
+            lcd.print(yn); 
+          }else if (yn == "Yes") {
+            yn = "No";
+            eraseLine(1);                      // Erases line 1        
+            lcd.print(yn);          
+          }
+          break;
+        case 4:                                // Left button, go back
+          button = 0;
+          activeButton = 1;
+          break;
+      }
+    }    
+  }  
+}
+
+void menuItem9() { // Function executes when you select the 8th item from main menu
+  int activeButton = 0;
+
+  printOnLCD("Cutting procedure", "- - - - - -");
+  
+  // drawInstructions(); // could be useful
+  // if the right button is pressed, then start the cutting procedure
+  // new submenu with special instructions and button functionalities
+
+  cuttingProcedure();
+
+
+  printOnLCD("Cutting Done!", "- - - - - -");
+  
+  while (activeButton == 0) {
+    int button;
+    readKey = analogRead(0);
+    if (readKey < 790) {
+      delay(100);
+      readKey = analogRead(0);
+    }
+    button = evaluateButton(readKey);
+    switch (button) {
+      case 4:  // This case will execute if the "back" button is pressed
+        button = 0;
+        activeButton = 1;
+        break;
+    }
+  }
+}
+
+
+void cuttingProcedure() {
+
+  eraseLine(1);
+  eraseLine(2);
+
+  jobTimer = millis();
+
+  // -------------------------------------------------------------------------------
+  //  calculate again the parameters
+  // -------------------------------------------------------------------------------
+
+  avanzamentoStd = kerf - Overlap;
+  dimSlot = (lumberWidth - tolerance * numberOfFingers)/(numberOfFingers*2);
+  slotTolerance = dimSlot + tolerance;
+  NumeroCicliInSlot = slotTolerance / (kerf - Overlap);
+  float initial_position = dimSlot;                                           // First cut has to be done after one finger
+
+  //  float finalCut = pinWidth - k;                // The final cut has its right hand edge on the right hand side of the slot
+  //  int c = ceil(pinWidth / k);                   // Number of cuts required per slot
+  
+  //  float inc = finalCut / (c - 1);               // Increment to be added for each cut - except the last
+
+
+  printOnLCD("Place the piece", "then press right-");
+
+  int activeButton = 0;
+  
+  while (activeButton == 0) {
+    int button;
+    readKey = analogRead(0);
+    if (readKey < 790) {
+      delay(100);
+      readKey = analogRead(0);
+    }
+    button = evaluateButton(readKey);
+    switch (button) {
+      case 1:                                     //  Right button is pressed 
+        activeButton = 1;                         //  Proceed to next step
+        
+        break;
+      case 4:                                     //  Left button, abort the cutting procedure
+        button = 0;
+        activeButton = 1;
+        // go back function or reset has to be added
+        break;
+    }    
+  }
+
+  printOnLCD("Adjust with motor", "then press right-");
+  
+  activeButton = 0;
+
+  while (activeButton == 0) {
+    int button;
+    readKey = analogRead(0);
+    if (readKey < 790) {
+      delay(100);
+      readKey = analogRead(0);
+    }
+    button = evaluateButton(readKey);
+    
+    switch (button) {
+      case 1:                                     //  Right button is pressed
+        activeButton = 1;                         //  Proceed to next step
+        break;
+      case 2:                                     // Up button
+        //  increment position of the motor
+        //  tbd external function to be used
+        moveBy(50,5);
+        break;
+      case 3:                                     // Down button
+        //  decrement position of the motor
+        //  tbd external function to be used
+        moveBy(-50,5);
+        break;
+    }    
+  }
+
+  //  tbd store the position using some new variable
+
+  displayNextStep("Turn on the saw", "then press right-");
+
+  //stepperMovement(initial_position);
+  
+  for (int i = 0; i < numberOfFingers; i++) {                 //  cycle to be performed for each finger
+      
+  }
+
+  displayNextStep("Cutting done", "press right");
+
+}
+
+
+void cutSlot() {
+
+  // 1) first movement
+  // stepperMovement(initial_position);       
+  displayNextStep("left cut", "press right");
+  cutSlot();
+  // calculate last position
+  // stepperMovement(last_position);
+  displayNextStep("right cut", "press right");
+  cutSlot();
+  // calculate initial_position + saw kurf - overhang
+  // stepperMovement(set_position);
+  for (int z = 0; z = 10; z++) {
+    displayNextStep("inner cuts", "press right");
+    cutSlot();
+    // calculate set_position + saw kurf - overhang
+    // stepperMovement(set_position);  
+  }  
+
+}
+
+
+void printOnLCD(String alpha, String beta) {
+  lcd.clear();                                     
+  lcd.setCursor(0, 0);
+  lcd.print(alpha);
+  lcd.setCursor(0, 1);
+  lcd.print(beta);
+}
+
+void printOnLCDA(String alpha, String beta) {
+  lcd.clear();                                     
+  lcd.setCursor(1, 0);
+  lcd.print(alpha);
+  lcd.setCursor(1, 1);
+  lcd.print(beta);
+}
+
+void displayNextStep(String alpha, String beta) {
+  printOnLCD(alpha, beta);
+  
+  int activeButton = 0;
+
+  while (activeButton == 0) {
+    int button;
+    readKey = analogRead(0);
+    if (readKey < 790) {
+      delay(100);
+      readKey = analogRead(0);
+    }
+    button = evaluateButton(readKey);
+    
+    switch (button) {
+      case 1:                                     // Right button is pressed
+        activeButton = 1;                         //  Proceed to next step
+        break;
+    }    
+  }  
+}
+
+//  while (activeButton == 0) {
+//    int button;
+//    readKey = analogRead(0);
+//    if (readKey < 790) {
+//      delay(100);
+//      readKey = analogRead(0);
+//    }
+//    button = evaluateButton(readKey);
+//    switch (button) {
+//      case 1:                                     // Right button is pressed
+//
+//        break;
+//      case 2:                                     // Up button
+//
+//        break;
+//      case 3:                                     // Down button
+//
+//        break;
+//      case 4:                                     // Left button, go back
+//
+//        break;
+//    }    
+//  }
+
+void moveUntil(int x, int vel){
+  // absolute stepping
+  
+  int stepsToGo; 
+  
+  stepsToGo = x - curPosition;
+
+  moveBy(stepsToGo, vel);
+ 
+  curPosition = x;
+  
+}
+
+
+void stepping(int del){
+    digitalWrite(STEP_PIN, HIGH);
+    digitalWrite(inLed, HIGH);
+    delayMicroseconds(del);                                        //  holding for some microseconds
+    digitalWrite(STEP_PIN, LOW);
+    digitalWrite(inLed, LOW);
+    delayMicroseconds(del);    
+}
+
+void moveBy(long steps, int vel) {
+
+    digitalWrite(Enable_PIN, LOW);
+    // relative stepping
+    int stpDelay;
+
+   if (steps >= 0){
+    digitalWrite(Enable_PIN, LOW);
+    digitalWrite(DIR_PIN, LOW);    
+  } else {
+    digitalWrite(Enable_PIN, LOW);
+    digitalWrite(DIR_PIN, HIGH);
+    steps = abs(steps);    
+  }
+    
+    stpDelay = map((11 - vel), 1, 10, minStepDelay, maxMovingStepDelay);
+  
+    int accelCycles = 300;
+    int del = maxMovingStepDelay;
+    int growRate =(maxMovingStepDelay-stpDelay)/accelCycles;
+  
+  
+    if (steps < (2* accelCycles)){
+      for (int i = 0; i < steps; i++) {
+        stepping(maxMovingStepDelay);  
+      }
+    }else{
+      stpDelay = map((11 - vel), 1, 10, minStepDelay, maxMovingStepDelay);
+      int accelCycles = 300;
+      int del = maxMovingStepDelay;
+      int growRate =(maxMovingStepDelay-stpDelay)/accelCycles;
+      for (int i = 0; i < steps; i++) {
+        if (i <= accelCycles) {
+          del = del - growRate;
+          if (del < stpDelay){
+            del = stpDelay;
+          }
+          stepping(del);
+        }else if ((steps - i) <= accelCycles)  {
+          del = del + growRate;
+          if (del < stpDelay){
+            del = stpDelay;
+          }
+          stepping(del);          
+        } else {
+          stepping(stpDelay);     
+        }    
+    }
+  }
+  curPosition = curPosition + steps;
+}
+
+
+void homingPro() {
+
+
+  while (digitalRead(lSwitch)) {        // while the limit switch is not pressed the routine goes
+    moveBy(-1, homingVelocity);                   // moving backwards very slowly in order to find the limit switch
+  }
+  delay(1000);
+  
+  while (!digitalRead(lSwitch)) {        // while the limit switch is not pressed the routine goes
+    moveBy(1, homingVelocity);                   // moving backwards very slowly in order to find the limit switch
+  }
+  
+  moveBy(150, homingVelocity);
+  curPosition = 0;
+  delay(2000);
+  
+}
